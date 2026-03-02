@@ -1,0 +1,109 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ ASCOVITA — Cashfree Payment Fix
+ READ THIS FULLY BEFORE DOING ANYTHING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHY PAYMENT IS NOT WORKING
+═══════════════════════════
+Your Hostinger website is a STATIC HTML file.
+Cashfree requires a BACKEND SERVER to create an order
+and get a payment_session_id.
+
+Without a backend:  ❌ Payment never starts
+With a backend:     ✅ Full UPI / Card / NetBanking works
+
+Your SECRET KEY must NEVER go in the HTML file.
+That's why there is a separate backend server.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 1 — DEPLOY THE BACKEND (FREE, takes 5 minutes)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Go to https://render.com → Sign up (FREE)
+
+2. Click "New +" → "Web Service"
+
+3. Choose "Deploy from public Git" OR "Upload files"
+   (If uploading: upload the cashfree-backend folder)
+
+4. Set these settings:
+   • Name:        ascovita-payment
+   • Environment: Node
+   • Build Command:  npm install
+   • Start Command:  node server.js
+   • Instance Type:  FREE
+
+5. Add Environment Variable:
+   Key:   CASHFREE_SECRET_KEY
+   Value: [YOUR SECRET KEY FROM CASHFREE DASHBOARD]
+
+   ⚠️  Get your Secret Key from:
+       Cashfree Dashboard → Settings → API Keys → Secret Key
+
+6. Click "Create Web Service"
+
+7. Render gives you a URL like:
+   https://ascovita-payment.onrender.com
+
+   COPY THIS URL — you need it in Step 2.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 2 — UPDATE YOUR index.html ON HOSTINGER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Open your index.html in Hostinger File Manager.
+
+Find this line (around line 2354 in your file):
+
+    window.ASCOVITA_API_ENDPOINT = 'https://your-server.com'
+
+Replace it with YOUR Render URL:
+
+    window.ASCOVITA_API_ENDPOINT = 'https://ascovita-payment.onrender.com'
+
+Save the file. That's all — payment will now work!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 3 — UPDATE CORS IN server.js
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+In server.js, find the ALLOWED_ORIGINS array and make
+sure your Hostinger domain is listed:
+
+    const ALLOWED_ORIGINS = [
+      'https://www.ascovita.com',   ← your domain
+      'https://ascovita.com',
+    ];
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+STEP 4 — TEST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Open your website
+2. Add any product to cart
+3. Go to checkout, fill the form
+4. Click "Pay Securely via Cashfree"
+5. Select UPI / Card etc.
+6. Cashfree's own payment screen should open
+7. After payment → Thank You page shows
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📁 cashfree-backend/
+   ├── server.js      → Deploy this on Render.com
+   └── package.json   → Deploy this on Render.com
+
+📄 index.html (on Hostinger)
+   → Change only 1 line (window.ASCOVITA_API_ENDPOINT)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+YOUR CREDENTIALS (App ID only — NOT Secret Key)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+App ID (x-client-id):  114759508ea58eec808caeb98b75957411
+Secret Key:            Set as environment variable on Render
+                       NEVER put in HTML or upload to GitHub
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
