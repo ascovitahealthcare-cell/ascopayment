@@ -1,273 +1,342 @@
-const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
+/**
+ * ══════════════════════════════════════════════════════════════════
+ *  ASCOVITA PAYMENT + SHIPPING BACKEND
+ *  Cashfree (TEST MODE) + Shiprocket
+ *  Deploy: https://ascopayment-2-0.onrender.com
+ * ══════════════════════════════════════════════════════════════════
+ *
+ *  TEST CREDENTIALS (Cashfree Sandbox):
+ *  App ID:  TEST10909359a2b60b1dde0c88c62dda9539090
+ *  API URL: https://sandbox.cashfree.com/pg   ← TEST endpoint
+ *
+ *  To switch to PRODUCTION later:
+ *  1. Change CASHFREE_BASE_URL to https://api.cashfree.com/pg
+ *  2. Change App ID + Secret to your LIVE credentials in Render env vars
+ *  3. Change Cashfree SDK mode to 'PRODUCTION' in index.html
+ * ══════════════════════════════════════════════════════════════════
+ */
+
+const express        = require('express');
+const cors           = require('cors');
+const axios          = require('axios');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 
-// ─── MIDDLEWARE ───────────────────────────────────────────────────────────────
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
+// ── CORS ──────────────────────────────────────────────────────────
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 app.options('*', cors());
 app.use(express.json());
 
-// ─── CONFIG — ALL CREDENTIALS FROM ENVIRONMENT VARIABLES ONLY ────────────────
-// Set these in Render Dashboard → Environment (never hardcode passwords in code)
-const CF_APP_ID  = process.env.CASHFREE_APP_ID     || '';
-const CF_SECRET  = process.env.CASHFREE_SECRET_KEY || '';
-const CF_BASE    = 'https://api.cashfree.com/pg';
+// ── CONFIG ────────────────────────────────────────────────────────
+// Cashfree TEST credentials
+// To go LIVE: change these env vars in Render Dashboard → Environment
+const CASHFREE_APP_ID     = process.env.CASHFREE_APP_ID     || 'TEST10909359a2b60b1dde0c88c62dda9539090';
+const CASHFREE_SECRET_KEY = process.env.CASHFREE_SECRET_KEY || '';   // ← Set your TEST secret key in Render env vars
+const CASHFREE_MODE       = process.env.CASHFREE_MODE       || 'TEST'; // 'TEST' or 'PROD'
 
-const SR_EMAIL   = process.env.SHIPROCKET_EMAIL    || '';
-const SR_PASS    = process.env.SHIPROCKET_PASSWORD || '';  // Never hardcoded here
-const SR_BASE    = 'https://apiv2.shiprocket.in/v1/external';
+// Automatically pick the right API URL based on mode
+const CASHFREE_BASE_URL = CASHFREE_MODE === 'PROD'
+  ? 'https://api.cashfree.com/pg'       // PRODUCTION
+  : 'https://sandbox.cashfree.com/pg';  // TEST / SANDBOX
 
-// Warn on startup if credentials are missing
-if (!SR_EMAIL || !SR_PASS) {
-  console.warn('[WARN] SHIPROCKET_EMAIL or SHIPROCKET_PASSWORD env vars not set!');
-}
-if (!CF_APP_ID || !CF_SECRET) {
-  console.warn('[WARN] CASHFREE_APP_ID or CASHFREE_SECRET_KEY env vars not set!');
-}
+// Shiprocket credentials
+const SHIPROCKET_EMAIL    = process.env.SHIPROCKET_EMAIL    || 'ascovitahealthcare@gmail.com';
+const SHIPROCKET_PASSWORD = process.env.SHIPROCKET_PASSWORD || '';   // ← Set in Render env vars
+const SHIPROCKET_BASE     = 'https://apiv2.shiprocket.in/v1/external';
 
-// Shiprocket token cache
-let srToken = null;
-let srTokenExpiry = 0;
+// Shiprocket token cache (valid 10 days)
+let srTokenCache = { token: null, expiresAt: 0 };
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+//  HEALTH CHECK
+// ─────────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({
-    status: 'ok',
-    service: 'Ascovita Payment Backend',
-    appId: CF_APP_ID || 'not-set',
-    mode: 'PRODUCTION',
-    timestamp: new Date().toISOString()
+    status:    'ok',
+    service:   'Ascovita Payment Backend',
+    mode:      CASHFREE_MODE,
+    appId:     CASHFREE_APP_ID.slice(0, 12) + '...',
+    apiUrl:    CASHFREE_BASE_URL,
+    timestamp: new Date().toISOString(),
   });
 });
 
-// ─── CASHFREE: CREATE ORDER ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  CASHFREE — CREATE ORDER (returns payment_session_id)
+// ══════════════════════════════════════════════════════════════════
 app.post('/api/create-cashfree-order', async (req, res) => {
   try {
-    const { order_id, order_amount, order_currency, customer_details } = req.body;
+    const { order_id, order_amount, order_currency = 'INR', customer_details } = req.body;
 
     if (!order_id || !order_amount || !customer_details) {
-      return res.status(400).json({ error: 'Missing: order_id, order_amount or customer_details' });
+      return res.status(400).json({ error: 'Missing required fields: order_id, order_amount, customer_details' });
     }
 
+    // Cashfree requires phone in 10-digit format (no country code)
+    let phone = String(customer_details.customer_phone || '').replace(/\D/g, '');
+    if (phone.startsWith('91') && phone.length === 12) phone = phone.slice(2);
+    if (phone.length !== 10) phone = '9898582650'; // fallback for test
+
     const payload = {
-      order_id: order_id,
-      order_amount: Number(order_amount),
-      order_currency: order_currency || 'INR',
+      order_id:       order_id,
+      order_amount:   Number(order_amount),
+      order_currency: order_currency,
       customer_details: {
         customer_id:    customer_details.customer_id    || ('CUST_' + Date.now()),
-        customer_name:  customer_details.customer_name  || '',
-        customer_email: customer_details.customer_email || '',
-        customer_phone: customer_details.customer_phone || ''
+        customer_name:  customer_details.customer_name  || 'Customer',
+        customer_email: customer_details.customer_email || 'customer@ascovita.com',
+        customer_phone: phone,
       },
       order_meta: {
-        return_url: 'https://ascovita.netlify.app/?order_id={order_id}',
-        notify_url: 'https://ascopayment-2-0.onrender.com/api/cashfree-webhook'
-      }
+        return_url: 'https://aqua-porpoise-757079.hostingersite.com/?cf_order={order_id}',
+        notify_url: 'https://ascopayment-2-0.onrender.com/api/cashfree-webhook',
+      },
     };
 
-    const response = await axios.post(CF_BASE + '/orders', payload, {
+    console.log(`📦 Creating Cashfree order [${CASHFREE_MODE}]: ${order_id} ₹${order_amount}`);
+
+    const response = await axios.post(`${CASHFREE_BASE_URL}/orders`, payload, {
       headers: {
         'x-api-version':   '2023-08-01',
-        'x-client-id':     CF_APP_ID,
-        'x-client-secret': CF_SECRET,
-        'Content-Type':    'application/json'
-      }
+        'x-client-id':     CASHFREE_APP_ID,
+        'x-client-secret': CASHFREE_SECRET_KEY,
+        'Content-Type':    'application/json',
+      },
+      timeout: 15000,
     });
+
+    console.log(`✅ Cashfree order created: ${response.data.order_id} | session: ${response.data.payment_session_id?.slice(0,20)}...`);
 
     return res.json({
       order_id:           response.data.order_id,
       payment_session_id: response.data.payment_session_id,
-      order_status:       response.data.order_status
+      order_status:       response.data.order_status,
+      mode:               CASHFREE_MODE,
     });
 
   } catch (err) {
-    console.error('[Cashfree] create-order error:', err.response && err.response.data ? err.response.data : err.message);
-    return res.status(500).json({ error: (err.response && err.response.data && err.response.data.message) || 'Cashfree error' });
+    const errData = err?.response?.data;
+    console.error('❌ Cashfree create order error:', errData || err.message);
+    return res.status(err?.response?.status || 500).json({
+      error:   errData?.message || errData?.error || 'Cashfree order creation failed',
+      details: errData || null,
+      mode:    CASHFREE_MODE,
+    });
   }
 });
 
-// ─── CASHFREE: VERIFY ORDER ───────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  CASHFREE — VERIFY ORDER STATUS
+// ══════════════════════════════════════════════════════════════════
 app.get('/api/verify-order/:orderId', async (req, res) => {
   try {
-    const response = await axios.get(CF_BASE + '/orders/' + req.params.orderId, {
+    const { orderId } = req.params;
+    console.log(`🔍 Verifying order [${CASHFREE_MODE}]: ${orderId}`);
+
+    const response = await axios.get(`${CASHFREE_BASE_URL}/orders/${orderId}`, {
       headers: {
         'x-api-version':   '2023-08-01',
-        'x-client-id':     CF_APP_ID,
-        'x-client-secret': CF_SECRET
-      }
+        'x-client-id':     CASHFREE_APP_ID,
+        'x-client-secret': CASHFREE_SECRET_KEY,
+      },
+      timeout: 10000,
     });
+
+    console.log(`✅ Order status: ${response.data.order_status}`);
     return res.json(response.data);
+
   } catch (err) {
-    console.error('[Cashfree] verify error:', err.message);
-    return res.status(500).json({ error: 'Verification failed' });
+    console.error('❌ Cashfree verify error:', err?.response?.data || err.message);
+    return res.status(err?.response?.status || 500).json({ error: 'Verification failed' });
   }
 });
 
-// ─── CASHFREE: WEBHOOK ────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  CASHFREE — WEBHOOK (payment status push from Cashfree)
+// ══════════════════════════════════════════════════════════════════
 app.post('/api/cashfree-webhook', (req, res) => {
-  console.log('[Cashfree] webhook received:', JSON.stringify(req.body));
+  console.log('💳 Cashfree webhook received:', JSON.stringify(req.body));
+  // TODO: verify signature and update order status in DB if needed
   res.json({ status: 'received' });
 });
 
-// ─── SHIPROCKET: GET TOKEN (cached 10 days) ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  SHIPROCKET — AUTH TOKEN (cached, auto-refreshes every 10 days)
+// ══════════════════════════════════════════════════════════════════
 async function getShiprocketToken() {
   const now = Date.now();
-  if (srToken && srTokenExpiry - now > 3600000) {
-    return srToken;
+  if (srTokenCache.token && srTokenCache.expiresAt - now > 3600000) {
+    return srTokenCache.token;
   }
-  console.log('[Shiprocket] Fetching new token...');
-  const resp = await axios.post(
-    SR_BASE + '/auth/login',
-    { email: SR_EMAIL, password: SR_PASS },
-    { headers: { 'Content-Type': 'application/json' } }
-  );
-  srToken = resp.data.token;
-  srTokenExpiry = now + (864000 * 1000); // 10 days
-  console.log('[Shiprocket] Token obtained OK');
-  return srToken;
+  console.log('🔑 Fetching fresh Shiprocket token…');
+  const resp = await axios.post(`${SHIPROCKET_BASE}/auth/login`, {
+    email:    SHIPROCKET_EMAIL,
+    password: SHIPROCKET_PASSWORD,
+  }, { headers: { 'Content-Type': 'application/json' }, timeout: 10000 });
+
+  srTokenCache.token     = resp.data.token;
+  srTokenCache.expiresAt = now + (864000 * 1000); // 10 days
+  console.log('✅ Shiprocket token obtained');
+  return srTokenCache.token;
 }
 
-// ─── SHIPROCKET: CREATE ORDER ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  SHIPROCKET — CREATE ORDER
+// ══════════════════════════════════════════════════════════════════
 app.post('/api/create-shiprocket-order', async (req, res) => {
   try {
-    const b = req.body;
+    const {
+      order_id, order_date, pickup_location = 'Primary',
+      billing_customer_name, billing_last_name,
+      billing_address, billing_address_2 = '',
+      billing_city, billing_pincode, billing_state,
+      billing_country = 'India',
+      billing_email, billing_phone,
+      shipping_is_billing = true,
+      order_items,
+      payment_method = 'Prepaid',
+      sub_total,
+      length = 15, breadth = 10, height = 10, weight = 0.5,
+    } = req.body;
 
-    if (!b.order_id || !b.billing_customer_name || !b.billing_phone || !b.billing_city || !b.billing_pincode || !b.order_items || !b.order_items.length) {
-      return res.status(400).json({ error: 'Missing required fields', required: ['order_id','billing_customer_name','billing_phone','billing_city','billing_pincode','order_items'] });
+    if (!order_id || !billing_customer_name || !billing_phone ||
+        !billing_city || !billing_pincode || !order_items?.length) {
+      return res.status(400).json({ error: 'Missing required Shiprocket fields' });
     }
 
     const token = await getShiprocketToken();
 
-    const payload = {
-      order_id:               b.order_id,
-      order_date:             b.order_date || new Date().toISOString().slice(0, 19).replace('T', ' '),
-      pickup_location:        b.pickup_location || 'Primary',
+    const srPayload = {
+      order_id,
+      order_date:             order_date || new Date().toISOString().slice(0, 19).replace('T', ' '),
+      pickup_location,
       channel_id:             '',
       comment:                'Ascovita D2C Order',
-      billing_customer_name:  b.billing_customer_name,
-      billing_last_name:      b.billing_last_name || '.',
-      billing_address:        b.billing_address || '',
-      billing_address_2:      b.billing_address_2 || '',
-      billing_city:           b.billing_city,
-      billing_pincode:        String(b.billing_pincode),
-      billing_state:          b.billing_state || 'Gujarat',
-      billing_country:        b.billing_country || 'India',
-      billing_email:          b.billing_email || '',
-      billing_phone:          String(b.billing_phone),
-      shipping_is_billing:    true,
-      order_items: b.order_items.map(function(item) {
-        return {
-          name:          item.name,
-          sku:           item.sku || ('ASC-' + item.name.replace(/\s+/g, '-').slice(0, 20)),
-          units:         Number(item.units) || 1,
-          selling_price: Number(item.selling_price) || 0,
-          discount:      Number(item.discount) || 0,
-          tax:           item.tax || '',
-          hsn:           item.hsn || '30049099'
-        };
-      }),
-      payment_method: b.payment_method || 'Prepaid',
-      sub_total:      Number(b.sub_total) || 0,
-      length:         Number(b.length)  || 15,
-      breadth:        Number(b.breadth) || 10,
-      height:         Number(b.height)  || 10,
-      weight:         Math.max(0.1, Number(b.weight) || 0.5)
+      billing_customer_name,
+      billing_last_name:      billing_last_name || '.',
+      billing_address,
+      billing_address_2,
+      billing_city,
+      billing_pincode:        String(billing_pincode),
+      billing_state,
+      billing_country,
+      billing_email,
+      billing_phone:          String(billing_phone),
+      shipping_is_billing,
+      order_items: order_items.map(i => ({
+        name:          i.name,
+        sku:           i.sku || ('ASC-' + Date.now()),
+        units:         Number(i.units) || 1,
+        selling_price: Number(i.selling_price) || 0,
+        discount:      Number(i.discount) || 0,
+        tax:           i.tax || '',
+        hsn:           i.hsn || '30049099',
+      })),
+      payment_method,
+      sub_total:  Number(sub_total) || 0,
+      length:     Number(length),
+      breadth:    Number(breadth),
+      height:     Number(height),
+      weight:     Math.max(0.1, Number(weight)),
     };
 
-    console.log('[Shiprocket] Creating order:', b.order_id);
+    console.log('📦 Creating Shiprocket order:', order_id);
 
     const srResp = await axios.post(
-      SR_BASE + '/orders/create/adhoc',
-      payload,
-      { headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token } }
+      `${SHIPROCKET_BASE}/orders/create/adhoc`,
+      srPayload,
+      {
+        headers: {
+          'Content-Type':  'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        timeout: 15000,
+      }
     );
 
-    const data = srResp.data;
-    console.log('[Shiprocket] Order created — SR ID:', data.order_id, 'Shipment:', data.shipment_id);
+    const srData = srResp.data;
+    console.log('✅ Shiprocket order created — SR ID:', srData.order_id, '| Shipment:', srData.shipment_id);
 
-    // Auto-assign courier + pickup (best-effort, won't fail the response if it errors)
-    if (data.shipment_id) {
-      autoAssignCourier(token, data.shipment_id).catch(function(e) {
-        console.warn('[Shiprocket] Auto-assign warning:', e.message);
-      });
+    // Auto-assign courier + generate pickup
+    if (srData.shipment_id) {
+      try {
+        await assignCourierAndPickup(token, srData.shipment_id);
+      } catch (e) {
+        console.warn('⚠️ Auto-assign courier failed (order still created):', e.message);
+      }
     }
 
     return res.json({
       success:      true,
-      order_id:     data.order_id,
-      shipment_id:  data.shipment_id,
-      awb_code:     data.awb_code     || null,
-      courier_name: data.courier_name || null,
-      status:       data.status       || 'NEW'
+      order_id:     srData.order_id,
+      shipment_id:  srData.shipment_id,
+      awb_code:     srData.awb_code    || null,
+      courier_name: srData.courier_name || null,
+      status:       srData.status      || 'NEW',
     });
 
   } catch (err) {
-    const errBody = err.response && err.response.data ? err.response.data : null;
-    console.error('[Shiprocket] create-order error:', errBody || err.message);
-    if (err.response && err.response.status === 401) {
-      srToken = null;
-      srTokenExpiry = 0;
-    }
-    return res.status((err.response && err.response.status) || 500).json({
-      error:   (errBody && errBody.message) || 'Shiprocket order creation failed',
-      details: errBody || null
+    const errData = err?.response?.data;
+    console.error('❌ Shiprocket order error:', errData || err.message);
+    if (err?.response?.status === 401) srTokenCache = { token: null, expiresAt: 0 };
+    return res.status(err?.response?.status || 500).json({
+      error:   errData?.message || 'Shiprocket order creation failed',
+      details: errData || null,
     });
   }
 });
 
-// Auto-assign best courier and schedule pickup
-async function autoAssignCourier(token, shipmentId) {
-  // Assign AWB with auto-selected courier
-  const awbResp = await axios.post(
-    SR_BASE + '/courier/assign/awb',
-    { shipment_id: [String(shipmentId)] },
-    { headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token } }
-  );
-  const awb = awbResp.data && awbResp.data.response && awbResp.data.response.data && awbResp.data.response.data.awb_code;
-  console.log('[Shiprocket] AWB assigned:', awb);
+// ── Auto-assign courier + generate pickup ─────────────────────────
+async function assignCourierAndPickup(token, shipmentId) {
+  const awbResp = await axios.post(`${SHIPROCKET_BASE}/courier/assign/awb`, {
+    shipment_id: [String(shipmentId)],
+  }, {
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    timeout: 10000,
+  });
+  console.log('🏷️ AWB assigned:', awbResp.data?.response?.data?.awb_code);
 
-  // Generate pickup
-  const pickupResp = await axios.post(
-    SR_BASE + '/courier/generate/pickup',
-    { shipment_id: [shipmentId] },
-    { headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token } }
-  );
-  const pickupDate = pickupResp.data && pickupResp.data.response && pickupResp.data.response.pickup_scheduled_date;
-  console.log('[Shiprocket] Pickup scheduled:', pickupDate);
+  await axios.post(`${SHIPROCKET_BASE}/courier/generate/pickup`, {
+    shipment_id: [shipmentId],
+  }, {
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    timeout: 10000,
+  });
+  console.log('🚚 Pickup request generated');
 }
 
-// ─── SHIPROCKET: TRACK ORDER ──────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  SHIPROCKET — TRACK ORDER
+// ══════════════════════════════════════════════════════════════════
 app.get('/api/track-shiprocket/:orderId', async (req, res) => {
   try {
     const token = await getShiprocketToken();
-    const resp = await axios.get(
-      SR_BASE + '/orders/show/' + req.params.orderId,
-      { headers: { 'Authorization': 'Bearer ' + token } }
-    );
+    const resp  = await axios.get(`${SHIPROCKET_BASE}/orders/show/${req.params.orderId}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+      timeout: 10000,
+    });
     return res.json(resp.data);
   } catch (err) {
-    console.error('[Shiprocket] track error:', err.message);
     return res.status(500).json({ error: 'Tracking fetch failed' });
   }
 });
 
-// ─── SHIPROCKET: AUTH TEST (debug endpoint) ───────────────────────────────────
-app.get('/api/shiprocket-status', async (req, res) => {
-  try {
-    const token = await getShiprocketToken();
-    return res.json({ status: 'ok', shiprocket: 'authenticated', tokenPreview: token.slice(0, 20) + '...' });
-  } catch (err) {
-    return res.status(500).json({ status: 'error', message: err.message });
-  }
-});
-
-// ─── START ────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+//  START SERVER
+// ══════════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, function() {
-  console.log('Ascovita Backend started on port ' + PORT);
-  console.log('Cashfree App ID : ' + (CF_APP_ID || 'NOT SET'));
-  console.log('Shiprocket Email: ' + SR_EMAIL);
-  console.log('Endpoints ready : /api/create-cashfree-order | /api/create-shiprocket-order | /api/track-shiprocket/:id');
+app.listen(PORT, () => {
+  console.log(`
+  ╔══════════════════════════════════════════════╗
+  ║   Ascovita Backend on port ${String(PORT).padEnd(17)}      ║
+  ║   Cashfree Mode : ${CASHFREE_MODE.padEnd(26)} ║
+  ║   Cashfree URL  : ${CASHFREE_BASE_URL.replace('https://','').slice(0,26).padEnd(26)} ║
+  ║   App ID        : ${CASHFREE_APP_ID.slice(0,26).padEnd(26)} ║
+  ╚══════════════════════════════════════════════╝
+  `);
 });
